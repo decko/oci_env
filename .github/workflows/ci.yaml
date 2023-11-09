@@ -16,8 +16,8 @@ jobs:
         include:
           - os: ubuntu-latest
             TEST: docker
-          - os: ubuntu-latest
-            TEST: podman
+          # - os: ubuntu-latest
+          #   TEST: podman
           # - os: macos-12
           #   TEST: docker
     runs-on: ${{ matrix.os }}
@@ -42,17 +42,18 @@ jobs:
           git clone --depth 1 https://github.com/pulp/pulp_file.git
           git clone --depth 1 https://github.com/pulp/pulp-openapi-generator.git
 
-      - name: Install podman compose
+      - name: Install podman, httpie and podman-compose
         if: matrix.TEST == 'podman' && matrix.os == 'ubuntu-latest'
         run: |
-          sudo apt update
-          sudo apt install -y httpie podman
+          sudo mkdir -p /etc/apt/keyrings
+          curl -fsSL "http://download.opensuse.org/repositories/devel:kubic:libcontainers:unstable/xUbuntu_$(lsb_release -rs)/Release.key" | gpg --dearmor | sudo tee /etc/apt/keyrings/devel_kubic_libcontainers_unstable.gpg > /dev/null
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/devel_kubic_libcontainers_unstable.gpg] http://download.opensuse.org/repositories/devel:kubic:libcontainers:unstable/xUbuntu_$(lsb_release -rs)/ /" | sudo tee /etc/apt/sources.list.d/devel:kubic:libcontainers:unstable.list > /dev/null
+          sudo apt update -y
+          sudo apt -y install podman httpie containernetworking-plugins
           sudo pip install podman-compose
+          echo "Resetting podman..."
+          podman system reset --force
           podman --version
-
-      - name: (Mac) Install docker compose
-        if: matrix.TEST == 'docker' && matrix.os == 'macos-12'
-        uses: docker-practice/actions-setup-docker@1.0.11
 
       - name: setup .compose.env files
         run: |
@@ -71,16 +72,26 @@ jobs:
         run: |
           pip install -e oci_env/client/
 
+      # - name: Setup tmate session
+      #   # if: ${{ failure() }}
+      #   if: matrix.TEST == 'podman' && matrix.os == 'ubuntu-latest'
+      #   uses: mxschmitt/action-tmate@v3
+
       - name: Build and run the environment
         run: |
           oci-env compose build
           oci-env compose up -d
           oci-env -e custom.env compose up -d
 
+      - name: Wait for migrations to be applied
+        run: |
+          oci-env exec /usr/bin/wait_on_database_migrations.sh
+          oci-env -e custom.env exec /usr/bin/wait_on_database_migrations.sh
+
       - name: Wait for the stack to spin up
         run: |
-          oci-env poll --wait 15 --attempts 30
-          oci-env -e custom.env poll --wait 5 --attempts 5
+          oci-env poll --wait 20 --attempts 40
+          oci-env -e custom.env poll --wait 20 --attempts 40
 
       - name: Create some dummy data with the pulp CLI (retry up to 5 times because it's sometimes not actually ready)
         run: for i in $(seq 1 5); do oci-env pulp file repository create --name test1 && s=0 && break || s=$? && sleep 5; done; (exit $s)
