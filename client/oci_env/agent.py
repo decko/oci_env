@@ -6,9 +6,6 @@ import shutil
 import socket
 import subprocess
 import tempfile
-from contextlib import contextmanager
-
-import fcntl
 
 from oci_env.logger import logger
 from oci_env.utils import (
@@ -25,7 +22,6 @@ DEFAULT_PORT_START = 5100
 DEFAULT_PORT_END = 5199
 AGENT_ENV_FILENAME = "compose.env"
 AGENT_OVERLAY_FILENAME = "plugin_volumes_compose.yaml"
-AGENT_CREATE_LOCK_FILENAME = ".create.lock"
 
 # Agent environments always use podman (rootless-friendly for parallel stacks).
 AGENT_COMPOSE_BINARY = "podman"
@@ -60,19 +56,6 @@ def agent_env_path(oci_env_path, agent_id):
 
 def agent_volume_overlay_path(oci_env_path, agent_id):
     return os.path.join(agent_compiled_dir(oci_env_path, agent_id), AGENT_OVERLAY_FILENAME)
-
-
-@contextmanager
-def agent_creation_lock(oci_env_path):
-    compiled = os.path.join(oci_env_path, ".compiled")
-    os.makedirs(compiled, exist_ok=True)
-    path = os.path.join(compiled, AGENT_CREATE_LOCK_FILENAME)
-    with open(path, "w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def validate_agent_id(agent_id):
@@ -337,69 +320,68 @@ def agent_create(args):
 
     compiled_dir = agent_compiled_dir(oci_env_path, args.agent_id)
     env_path = agent_env_path(oci_env_path, args.agent_id)
-    with agent_creation_lock(oci_env_path):
-        if os.path.exists(env_path) or (
-            os.path.isdir(compiled_dir) and os.listdir(compiled_dir)
-        ):
-            exit_with_error(f"Agent {args.agent_id!r} already exists at {compiled_dir}")
+    if os.path.exists(env_path) or (
+        os.path.isdir(compiled_dir) and os.listdir(compiled_dir)
+    ):
+        exit_with_error(f"Agent {args.agent_id!r} already exists at {compiled_dir}")
 
-        host_src_dir = os.path.abspath(args.host_src_dir or default_host_src_dir(oci_env_path))
-        plugins, plugin_paths = parse_plugins_arg(args.plugins, host_src_dir)
-        env_overrides = collect_env_overrides(args)
-        if "API_PORT" in env_overrides and args.port is not None:
-            exit_with_error("Specify API port with either --port or --env API_PORT, not both")
-        api_port = allocate_port(oci_env_path, preferred=env_overrides.get("API_PORT", args.port))
+    host_src_dir = os.path.abspath(args.host_src_dir or default_host_src_dir(oci_env_path))
+    plugins, plugin_paths = parse_plugins_arg(args.plugins, host_src_dir)
+    env_overrides = collect_env_overrides(args)
+    if "API_PORT" in env_overrides and args.port is not None:
+        exit_with_error("Specify API port with either --port or --env API_PORT, not both")
+    api_port = allocate_port(oci_env_path, preferred=env_overrides.get("API_PORT", args.port))
 
-        project_name = agent_project_name(args.agent_id)
-        compose_profile = env_overrides.get("COMPOSE_PROFILE") or "lean"
-        compiled_root = os.path.dirname(compiled_dir)
-        temp_dir = tempfile.mkdtemp(prefix=f".{project_name}.", dir=compiled_root)
-        os.chmod(temp_dir, 0o755)
-        try:
-            generator = os.path.join(host_src_dir, "pulp-openapi-generator")
-            if os.path.isdir(generator):
-                shutil.copytree(generator, os.path.join(temp_dir, "pulp-openapi-generator"))
-            overlay = write_plugin_volume_overlay(
-                os.path.join(temp_dir, AGENT_OVERLAY_FILENAME), plugin_paths
-            )
+    project_name = agent_project_name(args.agent_id)
+    compose_profile = env_overrides.get("COMPOSE_PROFILE") or "lean"
+    compiled_root = os.path.dirname(compiled_dir)
+    temp_dir = tempfile.mkdtemp(prefix=f".{project_name}.", dir=compiled_root)
+    os.chmod(temp_dir, 0o755)
+    try:
+        generator = os.path.join(host_src_dir, "pulp-openapi-generator")
+        if os.path.isdir(generator):
+            shutil.copytree(generator, os.path.join(temp_dir, "pulp-openapi-generator"))
+        overlay = write_plugin_volume_overlay(
+            os.path.join(temp_dir, AGENT_OVERLAY_FILENAME), plugin_paths
+        )
 
-            values = {
-                "OCI_AGENT_ID": args.agent_id,
-                "COMPOSE_PROFILE": compose_profile,
-                "DEV_SOURCE_PATH": ":".join(plugins),
-                "COMPOSE_PROJECT_NAME": project_name,
-                "API_PORT": str(api_port),
-                "SRC_DIR": compiled_dir,
-                "COMPOSE_BINARY": AGENT_COMPOSE_BINARY,
-                "API_HOST": "localhost",
-                "API_PROTOCOL": "http",
-                "PULP_SECRET_KEY": "dummy",
-                "OCI_AGENT_HOST_SRC_DIR": host_src_dir,
-                "OCI_AGENT_PLUGIN_PATHS": encode_plugin_paths(plugin_paths),
-                "OCI_AGENT_VOLUME_OVERLAY": agent_volume_overlay_path(
-                    oci_env_path, args.agent_id
-                ),
-            }
-            values.update(env_overrides)
-            write_env_file(os.path.join(temp_dir, AGENT_ENV_FILENAME), values)
-            os.replace(temp_dir, compiled_dir)
-        except BaseException:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            raise
+        values = {
+            "OCI_AGENT_ID": args.agent_id,
+            "COMPOSE_PROFILE": compose_profile,
+            "DEV_SOURCE_PATH": ":".join(plugins),
+            "COMPOSE_PROJECT_NAME": project_name,
+            "API_PORT": str(api_port),
+            "SRC_DIR": compiled_dir,
+            "COMPOSE_BINARY": AGENT_COMPOSE_BINARY,
+            "API_HOST": "localhost",
+            "API_PROTOCOL": "http",
+            "PULP_SECRET_KEY": "dummy",
+            "OCI_AGENT_HOST_SRC_DIR": host_src_dir,
+            "OCI_AGENT_PLUGIN_PATHS": encode_plugin_paths(plugin_paths),
+            "OCI_AGENT_VOLUME_OVERLAY": agent_volume_overlay_path(
+                oci_env_path, args.agent_id
+            ),
+        }
+        values.update(env_overrides)
+        write_env_file(os.path.join(temp_dir, AGENT_ENV_FILENAME), values)
+        os.replace(temp_dir, compiled_dir)
+    except BaseException:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
 
-        print(f"Created agent {args.agent_id}")
-        print(f"  env:     {env_path}")
-        print(f"  project: {project_name}")
-        print(f"  port:    {values['API_PORT']}")
-        print(f"  src:     {values['SRC_DIR']}")
-        print(f"  profile: {values['COMPOSE_PROFILE']}")
-        print(f"  compose: {AGENT_COMPOSE_BINARY}")
-        print(f"  plugins: {':'.join(plugins)}")
-        for plugin in plugins:
-            print(f"  {plugin}: {plugin_paths[plugin]}")
-        for key in sorted(env_overrides.keys()):
-            print(f"  {key}={env_overrides[key]}")
-        print(f"Start with: oci-env agent up {args.agent_id}")
+    print(f"Created agent {args.agent_id}")
+    print(f"  env:     {env_path}")
+    print(f"  project: {project_name}")
+    print(f"  port:    {values['API_PORT']}")
+    print(f"  src:     {values['SRC_DIR']}")
+    print(f"  profile: {values['COMPOSE_PROFILE']}")
+    print(f"  compose: {AGENT_COMPOSE_BINARY}")
+    print(f"  plugins: {':'.join(plugins)}")
+    for plugin in plugins:
+        print(f"  {plugin}: {plugin_paths[plugin]}")
+    for key in sorted(env_overrides.keys()):
+        print(f"  {key}={env_overrides[key]}")
+    print(f"Start with: oci-env agent up {args.agent_id}")
 
 
 def agent_up(args):
