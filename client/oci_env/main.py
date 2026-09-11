@@ -274,6 +274,16 @@ def parse_agent_command(subparsers):
         dest="install_client",
         help="Deprecated no-op. Clients are always installed into the agent container.",
     )
+    gen.add_argument("--attempts", type=int, default=30, help="API readiness poll attempts.")
+    gen.add_argument("--wait", type=int, default=10, help="Seconds between readiness polls.")
+    gen.add_argument(
+        "-v",
+        "--api-version",
+        default="v3",
+        choices=["v3", "v4"],
+        dest="api_version",
+        help="API version to generate a client for.",
+    )
     gen.set_defaults(func=agent_dispatch, agent_action="generate-client")
 
 
